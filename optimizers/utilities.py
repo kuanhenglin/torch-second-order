@@ -89,7 +89,7 @@ def forward(fn, data):
     return outputs, loss
 
 
-def minibatch(autodiff, fn, data, batch=None):
+def minibatch(autodiff, fn, data, batch=None, obj_reduction="mean"):
     """Computes minibatch for autodiff function
 
     Parameters:
@@ -104,9 +104,14 @@ def minibatch(autodiff, fn, data, batch=None):
             obj (Callable): objective function, computes the loss
                             (outputs: Tensor, labels: Tensor) -> Tensor
         data (tuple[Tensor, Tensor]): tuple of (inputs, labels)
+        batch (int): size of minibatch
+                     if batch is None, then minibatch is size of inputs
+        obj_reduction (str): objective function reduction method, supports "mean" and "sum"
+                             changes how minibatch accumulates loss and result depending on the
+                             reduction method of the objective function, must be manually set
 
     Returns:
-        result (tuple[Tensor]): result of minibatch autodiff
+        result (tuple[Tensor]): result of minibatch autodiff (mean-reduced)
         outputs (Tensor): outputs of the forward/model function fn[0]
         loss (Tensor): loss of the forward/model function via obj
     """
@@ -127,6 +132,12 @@ def minibatch(autodiff, fn, data, batch=None):
         while i < inputs.size(0):
             inputs_ = inputs[i:i + batch]
             labels_ = labels[i:i + batch]
+            if obj_reduction == "mean":
+                alpha = inputs_.size(0) / inputs.size(0)
+            elif obj_reduction == "sum":
+                alpha = inputs.size(0)
+            else:
+                raise ValueError("obj_reduction currently only supports \"mean\" and \"sum\".")
             if autodiff is None:
                 outputs_, loss_ = forward(fn, (inputs_, labels_))
             else:
@@ -134,10 +145,10 @@ def minibatch(autodiff, fn, data, batch=None):
                     outputs_, loss_ = forward(fn, (inputs_, labels_))
                     result_ = autodiff(outputs_, loss_)
                 if result is None:
-                    result = result_
+                    result = torch._foreach_mul(result_, alpha)
                 else:
-                    torch._foreach_add_(result, result_, alpha=inputs_.size(0) / inputs.size(0))
-            loss.add_(loss_, alpha=inputs_.size(0) / inputs.size(0))
+                    torch._foreach_add_(result, result_, alpha=alpha)
+            loss.add_(loss_, alpha=alpha)
             outputs.append(outputs_)
             i += batch
         outputs = torch.cat(outputs, dim=0)

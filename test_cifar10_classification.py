@@ -1,3 +1,5 @@
+from argparse import ArgumentParser
+
 import numpy as np
 import torch
 from torch import nn
@@ -80,7 +82,21 @@ class CNN(nn.Module):
                 flatten_size(dim=self.in_shape[2], max_pool=self.arch["max_pool"]))
 
 
+def evaluate(fn, data, batch):
+    _, (outputs, loss) = utils.minibatch(None, fn, data, batch=batch)
+    loss = loss.cpu().item()
+    acc = (torch.max(outputs, dim=1)[1] == data[1]).to(torch.float32).mean().cpu().item()
+    return loss, acc
+
+
 def main():
+    # argument parser
+    parser = ArgumentParser(description="Hessian-free Levenberg-Marquardt optimizer.")
+    parser.add_argument("-o", "--optim", dest="optim", default="lm", choices=("lm", "sgd"),
+                        help="Type of optimizer used, affects hyperparameters.")
+    args = parser.parse_args()
+
+    # device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"\nRunning on device: {device}\n")
 
@@ -97,15 +113,20 @@ def main():
     train_mean = train_data.data.mean(dim=0)[None, :]
     train_data.data.sub_(train_mean)  # mean-center data
     # test data
-    test_set = dsets.CIFAR10(root='./data', train=False, download=False,
-                             transform=trans.Compose([trans.ToTensor()]))
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size=5000)
+    test_data = dsets.CIFAR10(root='./data', train=False, download=False)
+    test_data.data = torch.moveaxis(
+        torch.tensor(test_data.data / 255, dtype=torch.float32, device=device), 3, 1)
+    test_data.targets = torch.tensor(test_data.targets, device=device)
+    test_data.data.sub_(train_mean)
 
     # objective and optimizer
-    obj = lambda outputs, labels: (labels - outputs).square().sum(dim=1).mean()
-    optim = LevenbergMarquardt(model.parameters(), sample=0.05, minibatch=2500, weight_decay=0.002)
-    # optim = GradientDescent(model.parameters(), lr=0.003, momentum=0.9, nesterov=True,
-    #                         weight_decay=0.002)
+    obj = lambda outputs, labels: (labels - outputs).square().sum(dim=1).mean()  # sum of squares
+    if args.optim == "lm":
+        optim = LevenbergMarquardt(model.parameters(), sample=0.05, minibatch=2500,
+                                   weight_decay=0.002)
+    elif args.optim == "sgd":
+        optim = GradientDescent(model.parameters(), lr=0.003, momentum=0.9, nesterov=True,
+                                weight_decay=0.002)
 
     # forward function
     def forward_fn(inputs):
@@ -117,33 +138,31 @@ def main():
                 labels.to(torch.int64), num_classes=outputs.size(1)).to(torch.float32)
         return obj(outputs, labels)  # we want squared error (no mean)
 
-    for i in tqdm(range(128), position=0):
+    # train and evaluation loop
+    iter_total = dict(lm=128, sgd=64000)[args.optim]
+    for i in tqdm(range(iter_total), position=0):
         # train
         model.zero_grad()
-        train_inputs, train_labels = train_data.data, train_data.targets
-        # train_inputs, train_labels = utils.sample_data(
-        #     data=(train_data.data, train_data.targets), sample=100)
-        train_outputs, train_loss = optim.step(fn=(forward_fn, obj_fn),
-                                               data=(train_inputs, train_labels))
-        train_loss = train_loss.cpu().item()
-        train_acc = (torch.max(train_outputs, dim=1)[1] == train_labels)\
-            .to(torch.float32).mean().cpu().item()
-        # test
-        test_acc, test_loss = 0, 0
-        if (i + 1) % 1 == 0:
+        if args.optim == "lm":
+            train_inputs, train_labels = train_data.data, train_data.targets
+        elif args.optim == "sgd":
+            train_inputs, train_labels = utils.sample_data(
+                data=(train_data.data, train_data.targets), sample=128)
+        optim.step(fn=(forward_fn, obj_fn), data=(train_inputs, train_labels))
+        # evaluate
+        if (i + 1) % round(iter_total / 128) == 0:
             with torch.no_grad():  # stop gradient accumulation to save memory
-                for j, data in enumerate(test_loader):
-                    test_inputs, test_labels = data[0].to(device), data[1].to(device)
-                    test_inputs.sub_(train_mean)
-                    test_outputs = model(test_inputs)
-                    test_loss += obj_fn(test_outputs, test_labels) *\
-                        test_inputs.size(0) / len(test_set)
-                    test_acc += (torch.max(test_outputs, dim=1)[1] == test_labels)\
-                        .to(torch.float32).mean() * test_inputs.size(0) / len(test_set)
-                test_acc, test_loss = test_acc.cpu().item(), test_loss.cpu().item()
+                # train
+                train_loss, train_acc = evaluate(
+                    (forward_fn, obj_fn), (train_inputs, train_labels), batch=5000)
+                # test
+                test_inputs, test_labels = test_data.data, test_data.targets
+                test_loss, test_acc = evaluate(
+                    (forward_fn, obj_fn), (test_inputs, test_labels), batch=5000)
+                # write
                 tqdm.write(f"[{i + 1}]\t   "
-                           f"Train: {(train_acc * 100):3f}% ({train_loss:5f})\t"
-                           f"Test: {(test_acc * 100):3f}% ({test_loss:5f})")
+                           f"Train: {round(train_acc * 100, 3):.3f}% ({round(train_loss, 5):.5f})\t"
+                           f"Test: {round(test_acc * 100, 3):.3f}% ({round(test_loss, 5):.5f})")
 
     print()
 

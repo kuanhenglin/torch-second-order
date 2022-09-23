@@ -98,7 +98,7 @@ class LevenbergMarquardt(Optimizer):
             #                                 = (d^2 loss / d^2 fn) (d fn / d params) = BJ
             BJv = self._Jvp(J_loss, params, v=v)
             JBJv = autograd.grad(fn, params, grad_outputs=BJv, retain_graph=retain_graph)
-            return JBJv
+            return torch._foreach_mul(JBJv, 1.0)
 
         def LMvp(fn, data, params, v, damping=True, weight_decay=True):
             """Computes minibatch Levenberg-Marquardt matrix-vector product
@@ -213,10 +213,11 @@ class LevenbergMarquardt(Optimizer):
             delta_quad = step_size * utils.mul_sum(self.state["descent"], grad_GN_desc)
             rho = delta_loss / delta_quad  # reduction ratio, actual / approximation
 
-            del self.state["gradient"]
-            del self.state["lcg_residual"]
             if not update_damping(rho):  # undo network parameter update
                 torch._foreach_sub_(params, self.state["descent"], alpha=step_size)
+
+            del self.state["gradient"]
+            del self.state["lcg_residual"]
 
         self._lcg = lcg
         self._line_search, self._step = line_search, step
@@ -241,7 +242,7 @@ class LevenbergMarquardt(Optimizer):
         else:  # initialize descent to all zeros
             self.state["descent"] = utils.identity(params, fill=0.0)
             tol = 1e-2 * group["lcg"]["tol"] * utils.mul_sum(self.state["gradient"], sqrt=True)
-        torch._foreach_mul_(self.state["descent"], group["lcg"]["momentum"])
+        torch._foreach_mul_(self.state["descent"], -group["lcg"]["momentum"])
 
         # use subsampled Gauss-Newton matrix (for performance and memory efficiency)
         data_sample = utils.sample_data(data, sample=group["sample"])
