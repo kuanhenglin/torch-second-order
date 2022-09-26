@@ -13,6 +13,11 @@ from optimizers.levenberg_marquardt import LevenbergMarquardt
 import optimizers.utilities as utils
 
 
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
 def get_arch():
     arch = dict(
         cnn_3=dict(filter=[16, 16, 16], kernel=[5, 3, 3],
@@ -20,7 +25,7 @@ def get_arch():
                    act="leaky_relu", act_out="linear"),
         cnn_4=dict(filter=[32, 64, 64], kernel=[5, 3, 3],
                    max_pool=[2, 2, 2], batch_norm=False,
-                   act="leaky_relu", act_out="linear"),
+                   act="relu", act_out="linear"),
         cnn_7=dict(filter=[32, 32, 64, 64, 64, 128], kernel=[5, 3, 3, 3, 3, 3],
                    max_pool=[1, 2, 1, 2, 1, 2], batch_norm=False,
                    act="leaky_relu", act_out="linear"))
@@ -87,14 +92,15 @@ class CNN(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Conv2d):
-            nn.init.kaiming_normal_(module.weight, a=0.3, nonlinearity=self.arch["act"])
+            nn.init.kaiming_uniform_(module.weight, a=0.3, nonlinearity=self.arch["act"])
             nn.init.constant_(module.bias, val=0.0)
         elif isinstance(module, nn.Linear):
-            nn.init.kaiming_normal_(module.weight, a=math.sqrt(5.0))
+            nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5.0))
             nn.init.constant_(module.bias, val=0.0)
         elif isinstance(module, nn.BatchNorm2d):
             nn.init.normal_(module.weight, mean=1.0, std=0.02)
             nn.init.constant_(module.bias, val=0.0)
+
 
 def evaluate(fn, data, batch):
     _, (outputs, loss) = utils.minibatch(None, fn, data, batch=batch)
@@ -106,17 +112,26 @@ def evaluate(fn, data, batch):
 def main():
     # argument parser
     parser = ArgumentParser(description="Hessian-free Levenberg-Marquardt optimizer.")
-    parser.add_argument("-o", "--optim", dest="optim", default="lm", choices=("lm", "gn", "sgd"),
+    parser.add_argument("-o", "--optim", dest="optim", default="lm",
+                        choices=("lm", "gn", "sgd"),
                         help="Type of optimizer used, affects hyperparameters.")
+    parser.add_argument("-n", "--net", dest="net", default="cnn_4",
+                        choices=("cnn_3", "cnn_4", "cnn_7"),
+                        help="Network architecture tested, see Python file for details.")
+    parser.add_argument("-s", "--seed", dest="seed", default=0, type=int,
+                        help="Seed for reproducability.")
     args = parser.parse_args()
 
     # device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"\nRunning on device: {device}\n")
 
+    # seed
+    set_seed(args.seed)
+
     # model
     arch = get_arch()
-    model = CNN(arch=arch["cnn_7"], in_shape=(3, 32, 32), out_shape=(10,)).to(device)
+    model = CNN(arch=arch[args.net], in_shape=(3, 32, 32), out_shape=(10,)).to(device)
     print(f"# of model parameters: {model.size}\n")
 
     # train data, feed entire dataset (for samping) every iteration
@@ -138,7 +153,8 @@ def main():
     if args.optim in ("lm", "gn"):
         damping = dict(lm=1.0, gn=0.0)[args.optim]
         optim = LevenbergMarquardt(model.parameters(), sample=0.05, minibatch=2500,
-                                   damping=damping, weight_decay=0.002)
+                                   damping=damping, damping_update=dict(method="nielsen"),
+                                   weight_decay=0.002)
     elif args.optim == "sgd":
         optim = GradientDescent(model.parameters(), lr=0.003, momentum=0.9, nesterov=True,
                                 weight_decay=0.002)

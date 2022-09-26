@@ -11,4 +11,8 @@ The following is a list of currently supported optimizers (ongoing):
 - Stochastic gradient descent (SGD) with Nesterov momentum \
   Usage: `python3 test_cifar_10_classification.py --optim sgd`
 
+You can use `python3 test_cifar_10_classification.py --help` to see the list of available arguments.
+
 Mathematical details and documentation coming soon.
+
+Currently test on CNNs has been implemented, and test on GANs are coming soon.

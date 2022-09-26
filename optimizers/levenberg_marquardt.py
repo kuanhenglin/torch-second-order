@@ -12,10 +12,16 @@ import optimizers.utilities as utils
 
 class LevenbergMarquardt(Optimizer):
 
-    def __init__(self, params, sample=0.05, minibatch=None, damping=1.0, damping_update=dict(),
-                 weight_decay=0.0, lcg=dict(), lr_factor=1e-2, **kwargs):
+    def __init__(self, params, sample=0.05, minibatch=None, damping=1.0,
+                 damping_update=dict(method="nielsen"), weight_decay=0.0,
+                 lcg=dict(), lr_factor=1e-2, **kwargs):
         # default value groups
-        damping_update_ = dict(rho_boost=0.25, rho_drop=0.75, boost=1.5, drop=1.5)
+        if damping_update["method"] == "marquardt":
+            damping_update_ = dict(rho_boost=0.25, rho_drop=0.75, boost=1.5, drop=1.5)
+        elif damping_update["method"] == "nielsen":
+            damping_update_ = dict(beta=2.0, gamma=3.0, p=3.0)
+        else:
+            raise ValueError("Damping update method only supports \"marquardt\" and \"nielsen\".")
         damping_update_.update(damping_update)
         lcg_ = dict(tol=1e-1, max=256, momentum=0.95, precond=True)
         lcg_.update(lcg)
@@ -29,6 +35,8 @@ class LevenbergMarquardt(Optimizer):
 
         # variables
         self.state["damping"] = torch.tensor(damping)
+        if damping_update["method"] == "nielsen":
+            self.state["v"] = torch.tensor(damping_update_["beta"])
 
     def _init_autodiff(self):
 
@@ -280,10 +288,22 @@ class LevenbergMarquardt(Optimizer):
 
         @torch.no_grad()
         def update_damping(rho):
-            if rho > group["damping_update"]["rho_drop"]:
-                self.state["damping"].div_(group["damping_update"]["drop"])
-            elif rho < group["damping_update"]["rho_boost"]:
-                self.state["damping"].mul_(group["damping_update"]["boost"])
+            if group["damping_update"]["method"] == "marquardt":
+                if rho > group["damping_update"]["rho_drop"]:
+                    self.state["damping"].div_(group["damping_update"]["drop"])
+                elif rho < group["damping_update"]["rho_boost"]:
+                    self.state["damping"].mul_(group["damping_update"]["boost"])
+            elif group["damping_update"]["method"] == "nielsen":
+                if rho > 0.0:
+                    beta = group["damping_update"]["beta"]
+                    gamma = group["damping_update"]["gamma"]
+                    p = group["damping_update"]["p"]
+                    self.state["damping"].mul_(max(
+                        1 / gamma, 1.0 - (beta - 1) * pow(2 * rho.cpu().item() - 1, p)))
+                    self.state["v"] = torch.tensor(group["damping_update"]["beta"])
+                else:
+                    self.state["damping"].mul_(self.state["v"])
+                    self.state["v"].mul_(2.0)
             return rho > 0.0  # only update network parameters if reduction ratio is positive
 
         @torch.no_grad()
