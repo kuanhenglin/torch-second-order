@@ -1,3 +1,4 @@
+import math
 from argparse import ArgumentParser
 
 import numpy as np
@@ -16,13 +17,13 @@ def get_arch():
     arch = dict(
         cnn_3=dict(filter=[16, 16, 16], kernel=[5, 3, 3],
                    max_pool=[2, 2, 2], batch_norm=False,
-                   act="leaky_relu", act_out=None),
+                   act="leaky_relu", act_out="linear"),
         cnn_4=dict(filter=[32, 64, 64], kernel=[5, 3, 3],
                    max_pool=[2, 2, 2], batch_norm=False,
-                   act="leaky_relu", act_out=None),
+                   act="leaky_relu", act_out="linear"),
         cnn_7=dict(filter=[32, 32, 64, 64, 64, 128], kernel=[5, 3, 3, 3, 3, 3],
                    max_pool=[1, 2, 1, 2, 1, 2], batch_norm=False,
-                   act="leak_relu", act_out=None))
+                   act="leaky_relu", act_out="linear"))
     return arch
 
 
@@ -36,6 +37,7 @@ class CNN(nn.Module):
         self.net, self.size = None, None
 
         self._init_net()
+        self.apply(self._init_weights)
 
     def forward(self, inputs):
         return self.net(inputs)
@@ -69,6 +71,8 @@ class CNN(nn.Module):
             layers.append(nn.LeakyReLU(negative_slope=0.3))
         elif act == "softmax":
             layers.append(nn.Softmax())
+        elif act == "linear":
+            pass
         return layers
 
     def _flatten_shape(self):
@@ -81,6 +85,16 @@ class CNN(nn.Module):
                 flatten_size(dim=self.in_shape[1], max_pool=self.arch["max_pool"]),
                 flatten_size(dim=self.in_shape[2], max_pool=self.arch["max_pool"]))
 
+    def _init_weights(self, module):
+        if isinstance(module, nn.Conv2d):
+            nn.init.kaiming_normal_(module.weight, a=0.3, nonlinearity=self.arch["act"])
+            nn.init.constant_(module.bias, val=0.0)
+        elif isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, a=math.sqrt(5.0))
+            nn.init.constant_(module.bias, val=0.0)
+        elif isinstance(module, nn.BatchNorm2d):
+            nn.init.normal_(module.weight, mean=1.0, std=0.02)
+            nn.init.constant_(module.bias, val=0.0)
 
 def evaluate(fn, data, batch):
     _, (outputs, loss) = utils.minibatch(None, fn, data, batch=batch)
@@ -92,7 +106,7 @@ def evaluate(fn, data, batch):
 def main():
     # argument parser
     parser = ArgumentParser(description="Hessian-free Levenberg-Marquardt optimizer.")
-    parser.add_argument("-o", "--optim", dest="optim", default="lm", choices=("lm", "sgd"),
+    parser.add_argument("-o", "--optim", dest="optim", default="lm", choices=("lm", "gn", "sgd"),
                         help="Type of optimizer used, affects hyperparameters.")
     args = parser.parse_args()
 
@@ -102,7 +116,7 @@ def main():
 
     # model
     arch = get_arch()
-    model = CNN(arch=arch["cnn_4"], in_shape=(3, 32, 32), out_shape=(10,)).to(device)
+    model = CNN(arch=arch["cnn_7"], in_shape=(3, 32, 32), out_shape=(10,)).to(device)
     print(f"# of model parameters: {model.size}\n")
 
     # train data, feed entire dataset (for samping) every iteration
@@ -121,9 +135,10 @@ def main():
 
     # objective and optimizer
     obj = lambda outputs, labels: (labels - outputs).square().sum(dim=1).mean()  # sum of squares
-    if args.optim == "lm":
+    if args.optim in ("lm", "gn"):
+        damping = dict(lm=1.0, gn=0.0)[args.optim]
         optim = LevenbergMarquardt(model.parameters(), sample=0.05, minibatch=2500,
-                                   weight_decay=0.002)
+                                   damping=damping, weight_decay=0.002)
     elif args.optim == "sgd":
         optim = GradientDescent(model.parameters(), lr=0.003, momentum=0.9, nesterov=True,
                                 weight_decay=0.002)
@@ -139,11 +154,11 @@ def main():
         return obj(outputs, labels)  # we want squared error (no mean)
 
     # train and evaluation loop
-    iter_total = dict(lm=128, sgd=64000)[args.optim]
+    iter_total = dict(lm=128, gn=256, sgd=64000)[args.optim]
     for i in tqdm(range(iter_total), position=0):
         # train
         model.zero_grad()
-        if args.optim == "lm":
+        if args.optim in ("lm", "gn"):
             train_inputs, train_labels = train_data.data, train_data.targets
         elif args.optim == "sgd":
             train_inputs, train_labels = utils.sample_data(
